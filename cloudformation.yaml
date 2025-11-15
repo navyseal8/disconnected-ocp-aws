@@ -1,0 +1,971 @@
+Description: >
+  This template is used to simulate a disconnected environment. It deploys a
+  VPC with a single public subnet and one private subnet. It deploys an internet gateway, with a default
+  route on the public subnet. A NAT instance running a Squid proxy is deployed
+  in the public subnet and is configured to block all traffic except for access
+  to the AWS APIs. The NAT instance is configured as the default route for the
+  private subnets, which effectively makes the private subnets simulate a
+  disconnected environment. A jump host is also deployed in the public subnet
+  and is configured to allow access to the VPC.
+
+Parameters:
+  VpcCidr:
+    Description: The IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  Password:
+    Description: The password for the lab-user account on the instances
+    Type: String
+
+  S3TransferBucketName:
+    Description: The name of the S3 bucket that will be used to transfer files
+    Type: String
+    Default: autogenerate
+
+  NatInstanceType:
+    Description: The instance type to use for the NAT instance
+    Type: String
+    Default: m5a.large
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - m4.large
+      - m4.xlarge
+      - m5.large
+      - m5a.large
+      - m5.xlarge
+      - c4.large
+      - c4.xlarge
+      - c5.large
+      - c5.xlarge
+
+  JumpInstanceType:
+    Description: The instance type to use for the Jump instance
+    Type: String
+    Default: m5a.large
+    AllowedValues:
+      - t3.small #2vCPU & 2GiB - too small for GNOME + VNC + Firefox
+      - t3.medium #2vCPU & 4GiB
+      - t3.large #2vCPU & 8GiB
+      - m4.large
+      - m4.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5a.large
+      - c4.large
+      - c4.xlarge
+      - c5.large
+      - c5.xlarge
+
+  HighSideInstanceType:
+    Description: The instance type to use for the High Side instance
+    Type: String
+    Default: m5a.large
+    AllowedValues:
+      - t3.large
+      - t3.xlarge
+      - m4.large
+      - m4.xlarge
+      - m5.large
+      - m5a.large
+      - m5a.xlarge
+      - m5.xlarge
+      - c4.large
+      - c4.xlarge
+      - c5.large
+      - c5.xlarge
+
+  JumpInstanceDataVolumeSize:
+    Description: The size of the data volume to attach to the Jump instance
+    Type: Number
+    Default: 300
+
+  HighSideInstanceDataVolumeSize:
+    Description: The size of the data volume to attach to the High Side instance
+    Type: Number
+    Default: 500
+
+  AccessKey:
+    Type: String
+
+  SecretKey:
+    Type: String
+
+  PullSecret:
+    Description: Base64 of the pull secret
+    Type: String
+
+# for region in us-east-1 us-east-2 us-west-1 us-west-2; do echo $region; aws ec2 describe-images --region $region --no-include-deprecated --filters Name=architecture,Values=x86_64 Name=name,Values=RHEL-9.6*Hourly* --owners amazon --output json | jq -r '.Images | sort_by(.CreationDate) | .[] | [.ImageId, .Name, .CreationDate, .State]  | @tsv'; done
+Mappings:
+  RegionMap:
+    ap-southeast-1:
+      ami: ami-0c76ffacce8b1be85
+    eu-central-1:
+      ami: ami-0066d4651999e27f1
+    eu-west-1:
+      ami: ami-0a4c5b9d019a5edc3
+    us-east-1:
+      ami: ami-03f1d522d98841360
+    us-east-2:
+      ami: ami-0d7ccd295b85f91f7
+    us-west-1:
+      ami: ami-07526c3503f7b7b55
+    us-west-2:
+      ami: ami-022daef1002763216
+
+Conditions:
+  GenerateS3BucketName: !Equals [!Ref S3TransferBucketName, autogenerate]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  #############################################################################
+  # Public Subnet
+  #############################################################################
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 6, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  #############################################################################
+  # Private Subnets
+  #############################################################################
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 6, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:
+            !Join [
+              "-",
+              [!Ref AWS::StackName, "private", !Select [0, !GetAZs ""]],
+            ]
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value:
+            !Join [
+              "-",
+              [
+                !Ref AWS::StackName,
+                "private",
+                !GetAtt PrivateSubnet1.AvailabilityZone,
+              ],
+            ]
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: NatInstance
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NatInstance
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  DefaultInstanceRole:
+    Type: AWS::IAM::Role
+    DependsOn: InstallIamUser
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-default-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join
+                    - ""
+                    - - "arn:aws:s3:::"
+                      - !If [
+                          GenerateS3BucketName,
+                          !Sub "ocp4-disconnected-${AWS::AccountId}-${AWS::Region}",
+                          !Ref S3TransferBucketName,
+                        ]
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join
+                    - ""
+                    - - "arn:aws:s3:::"
+                      - !If [
+                          GenerateS3BucketName,
+                          !Sub "ocp4-disconnected-${AWS::AccountId}-${AWS::Region}",
+                          !Ref S3TransferBucketName,
+                        ]
+                      - "/*"
+              - Effect: Allow
+                Action:
+                  - iam:CreateAccessKey
+                Resource:
+                  - !GetAtt InstallIamUser.Arn
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - ec2:DescribeSubnets
+                Resource: "*"
+
+  DefaultInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-default-profile
+      Path: /
+      Roles:
+        - !Ref DefaultInstanceRole
+
+  InstallIamUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub ${AWS::StackName}-install-user
+      Policies:
+        - PolicyName: AdministratorAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+
+  #############################################################################
+  # NAT Instance
+  #############################################################################
+
+  NatInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-nat-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:ModifyInstanceAttribute
+                Resource: "*"
+
+  NatInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-nat-profile
+      Path: /
+      Roles:
+        - !Ref NatInstanceRole
+
+  NatInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-nat-sg
+      GroupDescription: Allow HTTP and HTTPS from VPC to NAT instance
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref VpcCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref VpcCidr
+          Description: HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref VpcCidr
+          Description: SSH
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat-sg
+
+  NatInstanceWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Properties: {}
+
+  NatInstanceWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: NatInstance
+    Properties:
+      Handle: !Ref NatInstanceWaitHandle
+      Timeout: 900
+
+  NatInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap ["RegionMap", !Ref "AWS::Region", "ami"]
+      InstanceType: !Ref NatInstanceType
+      IamInstanceProfile: !Ref NatInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          GroupSet:
+            - !Ref NatInstanceSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat
+        - Key: AnsibleGroup
+          Value: nat
+        - Key: DnsName
+          Value: nat
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Redirect the user-data output to the console logs
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/01-disco-workshop.conf
+          systemctl restart sshd
+
+          useradd -G systemd-journal lab-user
+          echo "${Password}" | passwd --stdin lab-user
+          echo "lab-user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/50-lab-user
+
+          rm -f /etc/motd.d/insights-client
+
+          # Display a friendly name in bash
+          # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/set-hostname.html#set-hostname-shell
+          sed -i 's/\([[:blank:]]*\[[[:blank:]]"\$PS1"[[:blank:]]*=[[:blank:]]*".*\)\(\\h\)\(.*\)/\1$NICKNAME\3/g' /etc/bashrc
+          echo "export NICKNAME=nat" > /etc/profile.d/friendly_prompt.sh
+
+          # Apply the latest security patches
+          yum update -y --security
+          yum install -y unzip vim firewalld
+
+          # Install the AWS CLI
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q -d /tmp /tmp/awscliv2.zip && rm -f /tmp/awscliv2.zip && /tmp/aws/install && rm -rf /tmp/aws
+
+          # Disable source / destination check. It cannot be disabled from the launch configuration
+          region=${AWS::Region}
+          instanceid=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
+          aws ec2 modify-instance-attribute --no-source-dest-check --instance-id $instanceid --region $region
+
+          # Add RHUI cert to trust bundle
+          trust anchor /etc/pki/rhui/cdn.redhat.com-chain.crt
+          update-ca-trust
+
+          # Install and start Squid
+          yum install -y squid
+          /usr/lib64/squid/security_file_certgen -c -s /var/spool/squid/ssl_db -M 4MB
+          systemctl enable --now squid
+          sleep 5
+
+          cp -a /etc/squid /etc/squid_orig
+
+          # Create a SSL certificate for the SslBump Squid module
+          mkdir /etc/squid/ssl
+          pushd /etc/squid/ssl
+          openssl genrsa -out squid.key 4096
+          openssl req -new -key squid.key -out squid.csr -subj "/C=US/ST=VA/L=squid/O=squid/CN=squid"
+          openssl x509 -req -days 3650 -in squid.csr -signkey squid.key -out squid.crt
+          cat squid.key squid.crt >> squid.pem
+
+          echo '.amazonaws.com' > /etc/squid/whitelist.txt
+          echo '.cloudfront.net' >> /etc/squid/whitelist.txt
+          echo '.aws.ce.redhat.com' >> /etc/squid/whitelist.txt
+
+          cat > /etc/squid/squid.conf << 'EOF'
+
+          visible_hostname squid
+          cache deny all
+
+          # Log format and rotation
+          logformat squid %ts.%03tu %6tr %>a %Ss/%03>Hs %<st %rm %ru %ssl::>sni %Sh/%<a %mt
+          logfile_rotate 10
+          debug_options rotate=10
+
+          # Handle HTTP requests
+          http_port 3128
+          http_port 3129 intercept
+
+          # Handle HTTPS requests
+          https_port 3130 cert=/etc/squid/ssl/squid.pem ssl-bump intercept
+          acl SSL_port port 443
+          http_access allow SSL_port
+          acl step1 at_step SslBump1
+          acl step2 at_step SslBump2
+          acl step3 at_step SslBump3
+          ssl_bump peek step1 all
+
+          # Deny requests to proxy instance metadata
+          acl instance_metadata dst 169.254.169.254
+          http_access deny instance_metadata
+
+          # Filter HTTP requests based on the whitelist
+          acl allowed_http_sites dstdomain "/etc/squid/whitelist.txt"
+          http_access allow allowed_http_sites
+
+          # Filter HTTPS requests based on the whitelist
+          acl allowed_https_sites ssl::server_name "/etc/squid/whitelist.txt"
+          ssl_bump peek step2 allowed_https_sites
+          ssl_bump splice step3 allowed_https_sites
+          ssl_bump terminate step2 all
+
+          http_access deny all
+
+          EOF
+
+          /usr/sbin/squid -k parse && /usr/sbin/squid -k reconfigure
+
+          # Configure firewalld
+          sysctl -w net.ipv4.ip_forward=1 >> /etc/sysctl.d/10-custom.conf
+          firewall-offline-cmd --add-forward-port=port=80:proto=tcp:toport=3129
+          firewall-offline-cmd --add-forward-port=port=443:proto=tcp:toport=3130
+          firewall-offline-cmd --add-masquerade
+          systemctl enable --now firewalld
+
+          curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS","Reason" : "Configuration Complete","UniqueId" : "8675309","Data" : "Application has completed configuration."}' "${NatInstanceWaitHandle}"
+
+  #############################################################################
+  # Jump Instance
+  #############################################################################
+
+  JumpInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-jump-sg
+      GroupDescription: Allow SSH from everywhere to Jump instance
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref VpcCidr
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 5900
+          ToPort: 5900
+          CidrIp: 0.0.0.0/0
+          Description: VNC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-jump-sg
+
+  JumpInstanceWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Properties: {}
+
+  JumpInstanceWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: JumpInstance
+    Properties:
+      Handle: !Ref JumpInstanceWaitHandle
+      Timeout: 900
+
+  JumpInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      ImageId: !FindInMap ["RegionMap", !Ref "AWS::Region", "ami"]
+      InstanceType: !Ref JumpInstanceType
+      IamInstanceProfile: !Ref DefaultInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          GroupSet:
+            - !Ref JumpInstanceSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Ref JumpInstanceDataVolumeSize
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-jump
+        - Key: AnsibleGroup
+          Value: bastions
+        - Key: DnsName
+          Value: jump
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Redirect the user-data output to the console logs
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          cat <<EOF > /etc/ssh/sshd_config.d/01-disco-workshop.conf
+          PasswordAuthentication yes
+          ClientAliveInterval 15
+          ClientAliveCountMax 3
+          EOF
+          systemctl restart sshd
+
+          useradd -G systemd-journal lab-user
+          echo "${Password}" | passwd --stdin lab-user
+          echo "lab-user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/50-lab-user
+
+          rm -f /etc/motd.d/insights-client
+
+          # Display a friendly name in bash
+          # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/set-hostname.html#set-hostname-shell
+          sed -i 's/\([[:blank:]]*\[[[:blank:]]"\$PS1"[[:blank:]]*=[[:blank:]]*".*\)\(\\h\)\(.*\)/\1$NICKNAME\3/g' /etc/bashrc
+          echo "export NICKNAME=jump" > /etc/profile.d/friendly_prompt.sh
+
+          cat << EOF >> /etc/profile.d/z-color-shell.sh
+          PS1='[\[\e[44m\]\u@\$NICKNAME\[\e[0m\] \W]\$ '
+          EOF
+
+          # Apply the latest security patches
+          yum update -y --security
+          yum install -y unzip vim lvm2 git podman tmux jq bind-utils nano
+
+          echo ${PullSecret} | base64 -d | tr "'" '"' > /home/lab-user/pull-secret-example.json
+
+          cat << EOF >> /etc/tmux.conf
+          set -g mouse on
+          set -g status 3
+          set -g status-format[1] '#[bg=yellow]#[align=centre]Welcome to tmux - press [Ctrl + b then d] to Disconnect or press [Ctrl + b then ?] for additional Help'
+          set -g status-format[2] '#[bg=yellow]#[align=centre]Mouse mode has been turned on. Click to select your window/pane. Resize works too. Hold shift when selecting text.'
+          set-hook -g after-new-session "split-window"
+          EOF
+
+          # # Partition and mount data disk
+          # pvcreate /dev/nvme1n1
+          # vgcreate data /dev/nvme1n1
+          # lvcreate --name ocp --extents 100%VG data
+          # mkfs.xfs /dev/mapper/data-ocp
+          # mkdir /mnt/low-side-data
+          # echo '/dev/mapper/data-ocp /mnt/low-side-data xfs defaults 0 0' >> /etc/fstab
+          # systemctl daemon-reload
+          # mount /mnt/low-side-data
+
+          mkdir /mnt/low-side-data
+          chown lab-user:lab-user /mnt/low-side-data
+
+          # Install the AWS CLI
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q -d /tmp /tmp/awscliv2.zip && rm -f /tmp/awscliv2.zip && /tmp/aws/install && rm -rf /tmp/aws
+
+          # Disable the "do you trust this SSH host" messages
+          cat << EOF >> /etc/ssh/ssh_config.d/01-disco-workshop.conf
+          Host *
+            StrictHostKeyChecking false
+          EOF
+
+          # Set up certificates
+          cat << EOF > /usr/local/bin/scan-certificates.sh
+          #!/bin/bash
+
+          TMP_DIR=\$(mktemp -d)
+          for host in ingress.apps.salsa.lab:443 ingress.apps.disco.lab:443 salsa:8443 highside:8443; do
+            openssl s_client -connect \${!host} -showcerts 2>/dev/null </dev/null | \\
+            awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{ if(/BEGIN CERTIFICATE/){a++}; out="'\${!TMP_DIR}'/scan-'\${!host}'-"a".pem"; print >out}'
+          done
+
+          for file in \$(ls -1 \${!TMP_DIR}); do
+            if cmp -s /etc/pki/ca-trust/source/anchors/\${!file} \${!TMP_DIR}/\${!file}; then
+              rm \${!TMP_DIR}/\${!file}
+            fi
+          done
+
+          if [ ! \$(ls -1 \${!TMP_DIR} | wc -l) -eq "0" ]; then
+            echo "found new certificates to import: \$(ls -l \${!TMP_DIR})"
+            cp \${!TMP_DIR}/*.pem /etc/pki/ca-trust/source/anchors/
+            update-ca-trust
+          fi
+          rm -rf \${!TMP_DIR}
+          EOF
+
+          chmod +x /usr/local/bin/scan-certificates.sh
+
+          cat << EOF > /etc/systemd/system/scan-certificates.service
+          [Unit]
+          Description=Scan for certificates to add to ca-trust
+          Wants=network.target
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/scan-certificates.sh
+
+          [Install]
+          WantedBy=multi-user.target default.target
+          EOF
+
+          cat << EOF > /etc/systemd/system/scan-certificates.timer
+          [Unit]
+          Description=Run scan-certificates every so often
+
+          [Timer]
+          OnCalendar=*-*-* *:*:00,30
+          Persistent=true
+          AccuracySec=1s
+
+          [Install]
+          WantedBy=timers.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now scan-certificates.timer
+
+          # Setup VNC
+          yum -y install "@GNOME" firefox tigervnc-server
+
+          # disable search functionality in firefox address bar
+          echo 'pref("browser.urlbar.suggest.addons", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.urlbar.suggest.bestmatch", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.urlbar.suggest.engines", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.urlbar.suggest.history", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.urlbar.suggest.topsites", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.urlbar.suggest.weather", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("keyword.enabled", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+          echo 'pref("browser.newtabpage.enabled", false);' >> /usr/lib64/firefox/defaults/preferences/all-redhat.js
+
+          mkdir -vp /etc/firefox/policies
+          cat << EOF > /etc/firefox/policies/policies.json
+          {
+            "policies": {
+              "NoDefaultBookmarks": true,
+              "DisplayBookmarksToolbar": "always",
+              "DisableProfileImport": true,
+              "DisableTelemetry": true,
+              "SearchBar": "separate",
+              "SearchSuggestEnabled": false,
+              "Bookmarks": [
+                {
+                  "Title": "DISCO - Registry",
+                  "URL": "https://${HighSideInstance.PrivateDnsName}:8443",
+          	      "Favicon": "https://quay.io/static/img/quay_favicon.png",
+                  "Placement": "toolbar"
+                },
+                {
+                  "Title": "DISCO - OpenShift",
+                  "URL": "https://console-openshift-console.apps.disco.lab",
+          	      "Favicon": "https://raw.githubusercontent.com/openshift/origin-web-catalog/master/app/assets/img/favicon.ico",
+                  "Placement": "toolbar"
+                }
+              ],
+              "Homepage": {
+                "URL": "file:///home/lab-user/homepage.html",
+                "Locked": true,
+                "StartPage": "homepage-locked"
+              },
+              "FirefoxSuggest": {
+                "WebSuggestions": false,
+                "SponsoredSuggestions": false,
+                "ImproveSuggest": false,
+                "Locked": true
+              },
+              "UserMessaging": {
+                "WhatsNew": true,
+                "ExtensionRecommendations": true,
+                "FeatureRecommendations": true,
+                "UrlbarInterventions": true,
+                "SkipOnboarding": true,
+                "MoreFromMozilla": true,
+                "Locked": true
+              }
+            }
+          }
+          EOF
+
+          touch /home/lab-user/homepage.html
+          chown lab-user:lab-user /home/lab-user/homepage.html
+
+          firewall-cmd --add-service vnc-server --permanent  &&  firewall-cmd --reload  ||  echo "firewalld not installed"
+
+          export USER=lab-user   #USER=ec2-user
+          export DISPLAY=:0
+          export VNCPASSWD=${Password}
+
+          mkdir -pv /home/$USER/.config
+          echo "yes" > /home/$USER/.config/gnome-initial-setup-done
+          chown -vR $USER:$USER /home/$USER/.config
+
+          sudo -u $USER  dbus-launch --exit-with-session gsettings set org.gnome.shell welcome-dialog-last-shown-version '40.10'
+
+          echo "$DISPLAY=$USER" >> /etc/tigervnc/vncserver.users
+          mkdir -pv /home/$USER/.vnc
+          echo $VNCPASSWD | vncpasswd -f > /home/$USER/.vnc/passwd
+          echo "session=gnome-classic" >> /home/$USER/.vnc/config
+          chmod -v 0600 /home/$USER/.vnc/passwd
+          chown -vR $USER:$USER /home/$USER/.vnc
+
+          systemctl --global mask org.gnome.SettingsDaemon.Subscription.service
+          mkdir -pv /home/$USER/.config/autostart
+          cp -v /usr/share/applications/firefox.desktop /home/$USER/.config/autostart/
+          chown -vR $USER:$USER /home/$USER/.config/autostart
+
+          mkdir -pv /etc/systemd/system/vncserver\@.service.d
+          echo -e "[Service]\nRestart=always\n" >> /etc/systemd/system/vncserver\@.service.d/override.conf
+          systemctl enable --now vncserver@$DISPLAY
+
+          loginctl enable-linger lab-user
+
+          curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS","Reason" : "Configuration Complete","UniqueId" : "8675309","Data" : "Application has completed configuration."}' "${JumpInstanceWaitHandle}"
+
+  JumpInstanceEip:
+    Type: AWS::EC2::EIP
+    DependsOn: JumpInstance
+    Properties:
+      InstanceId: !Ref JumpInstance
+
+  #############################################################################
+  # High Side Instance
+  #############################################################################
+
+  HighSideInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-highside-sg
+      GroupDescription: Allow SSH from VPC to High Side instance
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref VpcCidr
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref VpcCidr
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 8443
+          ToPort: 8443
+          CidrIp: !Ref VpcCidr
+          Description: Mirror Registry
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-highside-sg
+
+  HighSideInstanceWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Properties: {}
+
+  HighSideInstanceWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: HighSideInstance
+    Properties:
+      Handle: !Ref HighSideInstanceWaitHandle
+      Timeout: 900
+
+  HighSideInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: NatInstanceWaitCondition
+    Properties:
+      ImageId: !FindInMap ["RegionMap", !Ref "AWS::Region", "ami"]
+      InstanceType: !Ref HighSideInstanceType
+      IamInstanceProfile: !Ref DefaultInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: false
+          GroupSet:
+            - !Ref HighSideInstanceSecurityGroup
+          SubnetId: !Ref PrivateSubnet1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Ref HighSideInstanceDataVolumeSize
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-highside
+        - Key: AnsibleGroup
+          Value: highside
+        - Key: DnsName
+          Value: highside
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Redirect the user-data output to the console logs
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/01-disco-workshop.conf
+          systemctl restart sshd
+
+          useradd -G systemd-journal lab-user
+          echo "${Password}" | passwd --stdin lab-user
+          echo "lab-user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/50-lab-user
+
+          curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS","Reason" : "Configuration Complete","UniqueId" : "8675309","Data" : "Application has completed configuration."}' "${HighSideInstanceWaitHandle}"
+
+          rm -f /etc/motd.d/insights-client
+
+          # Display a friendly name in bash
+          # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/set-hostname.html#set-hostname-shell
+          sed -i 's/\([[:blank:]]*\[[[:blank:]]"\$PS1"[[:blank:]]*=[[:blank:]]*".*\)\(\\h\)\(.*\)/\1$NICKNAME\3/g' /etc/bashrc
+          echo "export NICKNAME=highside" > /etc/profile.d/friendly_prompt.sh
+
+          cat << EOF >> /etc/profile.d/z-color-shell.sh
+          PS1='[\[\e[48;5;208m\]\u@\$NICKNAME\[\e[0m\] \W]\$ '
+          EOF
+
+          # set up certificates
+          cp -v /etc/pki/rhui/cdn.redhat.com-chain.crt /etc/pki/ca-trust/source/anchors/
+          update-ca-trust
+
+          # Apply the latest security patches
+          yum update -y --security
+          yum install -y unzip vim lvm2 podman tmux jq nano
+
+          echo "set -g mouse on" >> /etc/tmux.conf
+
+          # # Partition and mount data disk
+          # pvcreate /dev/nvme1n1
+          # vgcreate data /dev/nvme1n1
+          # lvcreate --name ocp --extents 100%VG data
+          # mkfs.xfs /dev/mapper/data-ocp
+          # mkdir /mnt/high-side-data
+          # echo '/dev/mapper/data-ocp /mnt/high-side-data xfs defaults 0 0' >> /etc/fstab
+          # systemctl daemon-reload
+          # mount /mnt/high-side-data
+
+          mkdir /mnt/high-side-data
+          chown lab-user:lab-user /mnt/high-side-data
+
+          # Install the AWS CLI
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q -d /tmp /tmp/awscliv2.zip && rm -f /tmp/awscliv2.zip && /tmp/aws/install && rm -rf /tmp/aws
+
+          loginctl enable-linger lab-user
+
+
+  #############################################################################
+  # S3 Transfer Bucket
+  #############################################################################
+
+  S3TransferBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName:
+        !If [
+          GenerateS3BucketName,
+          !Sub "${AWS::StackName}-${AWS::AccountId}-${AWS::Region}",
+          !Ref S3TransferBucketName,
+        ]
+
+Outputs:
+  Vpc:
+    Description: A reference to the created VPC
+    Value: !Ref Vpc
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [",", [!Ref PrivateSubnet1]]
+
+  PublicSubnet1:
+    Description: A reference to the public subnet
+    Value: !Ref PublicSubnet
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+
+  S3TransferBucket:
+    Description: A reference to the S3 transfer bucket
+    Value: !Ref S3TransferBucket
+
+  JumpInstancePublicIp:
+    Description: A reference to the public EIP allocated to the Jump instance
+    Value: !Ref JumpInstanceEip
+
+  HighSideInstancePrivateIp:
+    Description: A reference to the private IP to the High Side instance
+    Value: !GetAtt HighSideInstance.PrivateIp
+
+  InstallIamUser:
+    Description: A reference to the IAM User to use for installing OpenShift
+    Value: !Ref InstallIamUser

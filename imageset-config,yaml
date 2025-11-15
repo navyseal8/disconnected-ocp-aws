@@ -1,0 +1,40 @@
+apiVersion: mirror.openshift.io/v2alpha1
+kind: ImageSetConfiguration
+mirror:
+  platform:
+    channels:
+    - name: stable-4.19
+      type: ocp
+      minVersion: 4.19.17
+      maxVersion: 4.19.17
+    graph: true
+  operators:
+    - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.19
+      packages:
+       - name: openshift-gitops-operator
+         channels:
+         - name: latest
+       - name: ansible-automation-platform-operator
+         channels:
+         - name: stable-2.6
+    - catalog: registry.redhat.io/redhat/certified-operator-index:v4.19
+      packages:
+       - name: gitlab-runner-operator
+         channels:
+         - name: stable
+       - name: gitlab-operator-kubernetes
+         channels:
+         - name: stable
+       - name: hcp-terraform-operator
+         channels:
+         - name: alpha
+         - name: stable
+       - name: splunk-operator
+         channels:
+         - name: stable
+       - name: vault-secrets-operator
+         channels:
+         - name: stable
+  additionalImages:
+   - name: registry.redhat.io/rhel9/support-tools
+   - name: registry.redhat.io/ubi9/ubi@sha256:20f695d2a91352d4eaa25107535126727b5945bff38ed36a3e59590f495046f0
