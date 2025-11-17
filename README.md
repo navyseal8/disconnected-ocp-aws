@@ -332,4 +332,6 @@ $ oc login -u kubeadmin -p xxxxx https://api.xxxx.sandboxXXXX.opentlc.com:6443
 ```
 $ ssh -L 5900:localhost:5900 -N -f lab-user@jumphost.sandboxXXXX.opentlc.com
 $ vncviewer localhost
+
+# Open firefox to access OpenShift console.
 ```
