@@ -21,13 +21,18 @@ Operators:
 ## AWS Architecture
 
 This is based off the work from https://naps-product-sa.github.io/ocp4-disconnected-workshop/modules/index.html
+with these exception:
+- 3 node control-plane, 3 workers
+- removal of salsa SNO cluster from cloudformation
+- use of latest oc-mirror v2
+
+![AWS](aws.png)
 
 - The lowside bastion lives in the public subnet, and able to download release images.
 - The highside bastion lives in the private subnet and serve as the mirror-registry.
 - The disconnected OpenShift will be provisioned in the private subnet, simulating no internal access.
 - The squid proxy allows limited traffic to aws private endpoint (for provisiong purpose).
 
-![AWS](aws.png)
 
 ## Prepare lowside host
 
