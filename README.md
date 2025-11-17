@@ -29,7 +29,7 @@ This is based off the work from https://naps-product-sa.github.io/ocp4-disconnec
 
 ![AWS](aws.png)
 
-## Prepare bastion host
+## Prepare lowside host
 
 1. Download oc-mirror v2 
 ```
@@ -61,7 +61,7 @@ $ rm -f oc.tar.gz
 $ sudo cp -v oc /bin
 ```
 
-## Mirror registry and operators to local disk (On Bastion Host)
+## Mirror registry and operators to local disk (On lowside Host)
 
 1. Create [imageset-config.yaml](imageset-config.yaml) to your specific OpenShift version.
 2. Select the operators that you need by checking against the catalog index image
