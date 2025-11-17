@@ -27,7 +27,7 @@ This is based off the work from https://naps-product-sa.github.io/ocp4-disconnec
 - The disconnected OpenShift will be provisioned in the private subnet, simulating no internal access.
 - The squid proxy allows limited traffic to aws private endpoint (for provisiong purpose).
 
-![AWS][aws.png]
+![AWS](aws.png)
 
 ## Prepare bastion host
 
