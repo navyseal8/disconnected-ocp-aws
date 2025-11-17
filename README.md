@@ -16,7 +16,7 @@ Operators:
 
 1. Login to AWS console, select region
 2. Nagivate to CloudFormation
-3. Provision template (using cloudformation.yaml)
+3. Provision template using [cloudformation.yaml](cloudformation.yaml)
 
 ## AWS Architecture
 
@@ -56,7 +56,7 @@ $ sudo cp -v oc /bin
 
 ## Mirror registry and operators to local disk (On Bastion Host)
 
-1. Create imageset-config.yaml to your specific OpenShift version.
+1. Create [imageset-config.yaml](imageset-config.yaml) to your specific OpenShift version.
 2. Select the operators that you need by checking against the catalog index image
 
 ```
@@ -141,7 +141,7 @@ $ oc-mirror --config imageset-config.yaml file:///mnt/low-side-data --v2
 ## Transfer the installer content
 
 ```
-rsync -avP /mnt/low-side-data/ highside:/mnt/high-side-data/
+$ rsync -avP /mnt/low-side-data/ highside:/mnt/high-side-data/
 
 # 65G of data to copy - 10 mins
 ```
@@ -247,5 +247,82 @@ $ oc-mirror -c ./imageset-config.yaml --from file:///mnt/high-side-data/disk doc
 ```
 ## Install disconnected OpenShift
 
-1. Prepare install-config.yaml
-2. 
+1. Customise the OpenShift cluster using [install-config.yaml](install-config.yaml)
+- Estimate ~45-60 mins installation time
+
+```
+# Update SSH-key, pullSecret, imageContentSource, trustBundles etc
+
+$ ssh-keygen -C "OpenShift Debug" -N "" -f /mnt/high-side-data/id_rsa
+$ echo "sshKey: $(cat /mnt/high-side-data/id_rsa.pub)" | tee -a /mnt/high-side-data/install-config.yaml
+$ echo "pullSecret: '$(jq -c . $XDG_RUNTIME_DIR/containers/auth.json)'" | tee -a /mnt/high-side-data/install-config.yaml
+
+$ cat << EOF >> /mnt/high-side-data/install-config.yaml
+imageContentSources:
+$(grep -A2 "mirrors:" --no-group-separator /mnt/high-side-data/disk/working-dir/cluster-resources/idms-oc-mirror.yaml)
+EOF
+
+$ cat << EOF >> /mnt/high-side-data/install-config.yaml
+additionalTrustBundle: |
+$(sed 's/^/  /' /home/lab-user/quay-install/quay-rootCA/rootCA.pem)
+EOF
+```
+
+2. Start the installation
+```
+# Backup your install-config.yaml as it gets erase 
+
+$ cp install-config.yaml /mnt/highside/installer/
+$ openshift-install create cluster --dir /mnt/high-side-data/installer
+WARNING platform.aws.subnets is deprecated. Converted to platform.aws.vpc.subnets
+WARNING imageContentSources is deprecated, please use ImageDigestSources
+INFO Credentials loaded from the AWS config using "SharedConfigCredentials: /home/lab-user/.aws/config" provider
+INFO Successfully populated MCS CA cert information: root-ca 2035-11-11T09:04:00Z 2025-11-13T09:04:00Z
+INFO Successfully populated MCS TLS cert information: root-ca 2035-11-11T09:04:00Z 2025-11-13T09:04:00Z
+INFO Consuming Install Config from target directory
+INFO Adding clusters...
+INFO Creating infrastructure resources...
+INFO Reconciling IAM roles for control-plane and compute nodes
+INFO Creating IAM role for master
+INFO Creating IAM role for worker
+...
+...
+...
+INFO Control-plane machines are ready
+INFO Cluster API resources have been created. Waiting for cluster to become ready...
+INFO Waiting up to 20m0s (until 9:27AM UTC) for the Kubernetes API at https://api.xxxx.sandboxXXXX.opentlc.com:6443...
+INFO API v1.32.9 up
+INFO Waiting up to 45m0s (until 9:59AM UTC) for bootstrapping to complete...
+INFO Waiting for the bootstrap etcd member to be removed...
+INFO Bootstrap etcd member has been removed
+INFO Destroying the bootstrap resources...
+INFO Waiting up to 5m0s for bootstrap machine deletion openshift-cluster-api-guests/xxxx-45j9s-bootstrap...
+INFO Shutting down local Cluster API controllers...
+INFO Stopped controller: Cluster API
+INFO Stopped controller: aws infrastructure provider
+INFO Shutting down local Cluster API control plane...
+INFO Local Cluster API system has completed operations
+INFO Finished destroying bootstrap resources
+INFO Waiting up to 40m0s (until 10:20AM UTC) for the cluster at https://api.xxxx.sandboxXXXX.opentlc.com:6443 to initialize...
+INFO Waiting up to 30m0s (until 10:27AM UTC) to ensure each cluster operator has finished progressing...
+INFO All cluster operators have completed progressing
+INFO Checking to see if there is a route at openshift-console/console...
+INFO Install complete!
+INFO To access the cluster as the system:admin user when using 'oc', run
+INFO     export KUBECONFIG=/mnt/high-side-data/installer/auth/kubeconfig
+INFO Access the OpenShift web-console here: https://console-openshift-console.apps.xxxxx.sandboxXXXX.opentlc.com
+INFO Login to the console with user: "kubeadmin", and password: "xxxxx-xxxx-xxxxx-xxxxx"
+INFO Time elapsed: 54m40s
+```
+
+## Logging in to the disconnected OpenShift
+1. via low-side bastion
+```
+$ ssh lowside
+$ oc login -u kubeadmin -p xxxxx https://api.xxxx.sandboxXXXX.opentlc.com:6443
+```
+2. via vncviewer
+```
+$ ssh -L 5900:localhost:5900 -N -f lab-user@jumphost.sandboxXXXX.opentlc.com
+$ vncviewer localhost
+```
