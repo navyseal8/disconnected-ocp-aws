@@ -112,7 +112,10 @@ Authenticating with existing credentials for registry.redhat.io
 Existing credentials are valid. Already logged in to registry.redhat.io
 ```
 
-4. Mirror the OpenShift version release packages
+4. Mirror the OpenShift version release packages (mirrorToDisk)
+
+- about 35 mins download + 13 mins tar-ing = 48mins
+
 ```
 *** Do these in tmux session ***
 
