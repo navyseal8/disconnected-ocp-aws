@@ -17,6 +17,9 @@ mirror:
        - name: ansible-automation-platform-operator
          channels:
          - name: stable-2.6
+       - name: devspaces
+         channels:
+         - name: stable
     - catalog: registry.redhat.io/redhat/certified-operator-index:v4.19
       packages:
        - name: gitlab-runner-operator
