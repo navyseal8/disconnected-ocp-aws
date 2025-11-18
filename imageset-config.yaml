@@ -17,12 +17,16 @@ mirror:
        - name: ansible-automation-platform-operator
          channels:
          - name: stable-2.6
-       - name: devspaces-operator-bundle
+       - name: devspaces
          channels:
          - name: stable
-       - name: web-terminal.v1.14
+       - name: devspacesoperator.v3.23.0
+         channels:
+         - name: stable
+       - name: web-terminal
          channels:
          - name: fast
+         - name: stable
     - catalog: registry.redhat.io/redhat/certified-operator-index:v4.19
       packages:
        - name: gitlab-runner-operator
